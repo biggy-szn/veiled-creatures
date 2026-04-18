@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>∅ ENTITY</title>
+<style>
+  *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+  :root {
+    --void: #000000;
+    --ghost: rgba(160,200,255,0.85);
+    --fear: rgba(255,30,40,0.9);
+    --calm: rgba(80,200,160,0.85);
+    --chaos: rgba(200,80,255,0.85);
+    --white: rgba(230,230,230,0.9);
+  }
+  html, body {
+    width:100%; height:100%;
+    background: #000;
+    overflow: hidden;
+    cursor: crosshair;
+  }
+  #wrap {
+    position: relative;
+    width: 100vw; height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+  }
+  canvas { position: absolute; top:0; left:0; }
+  #ui {
+    position: fixed;
+    bottom: 24px; left: 50%;
+    transform: translateX(-50%);
+    display: flex; gap: 2px;
+    z-index: 100;
+  }
+  .moodBtn {
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.12);
+    color: rgba(255,255,255,0.3);
+    font-family: 'Courier New', monospace;
+    font-size: 9px;
+    letter-spacing: 3px;
+    padding: 6px 14px;
+    cursor: pointer;
+    transition: all 0.3s;
+    text-transform: uppercase;
+  }
+  .moodBtn:hover { color: rgba(255,255,255,0.7); border-color: rgba(255,255,255,0.3); }
+  .moodBtn.active { border-color: rgba(255,255,255,0.6); color: rgba(255,255,255,0.9); }
+  #status {
+    position: fixed;
+    top: 18px; left: 18px;
+    font-family: 'Courier New', monospace;
+    font-size: 8px;
+    color: rgba(255,255,255,0.18);
+    letter-spacing: 2px;
+    line-height: 1.8;
+    z-index: 100;
+  }
+  #scanline-overlay {
+    position: fixed; top:0; left:0; width:100%; height:100%;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      0deg, transparent, transparent 3px,
+      rgba(0,0,0,0.07) 3px, rgba(0,0,0,0.07) 4px
+    );
+    z-index: 50;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="bg"></canvas>
+  <canvas id="entity"></canvas>
+  <canvas id="veil"></canvas>
+</div>
+<div id="scanline-overlay"></div>
+<div id="ui">
+  <button class="moodBtn active" data-mood="fear">FEAR</button>
+  <button class="moodBtn" data-mood="calm">CALM</button>
+  <button class="moodBtn" data-mood="chaos">CHAOS</button>
+  <button class="moodBtn" data-mood="void">VOID</button>
+</div>
+<div id="status">
+  <div>∅ ENTITY // UNDEFINED</div>
+  <div id="stat-mood">MOOD: FEAR</div>
+  <div id="stat-t">T: 0.000</div>
+  <div id="stat-sym">SYM: UNSTABLE</div>
+  <div id="stat-depth">DEPTH: --</div>
+</div>
+
+<script>
+// ---- Canvas setup ----
+const W = window.innerWidth, H = window.innerHeight;
+const CX = W/2, CY = H/2;
+const SIZE = Math.min(W, H);
+
+function setupCanvas(id) {
+  const c = document.getElementById(id);
+  c.width = W; c.height = H;
+  return c.getContext('2d');
+}
+const bgCtx    = setupCanvas('bg');
+const entCtx   = setupCanvas('entity');
+const veilCtx  = setupCanvas('veil');
+
+// ---- Perlin noise ----
+const _perm = new Uint8Array(512);
+const _g2 = [[1,1],[-1,1],[1,-1],[-1,-1],[1,0],[-1,0],[0,1],[0,-1]];
+for (let i=0;i<256;i++) _perm[i]=i;
+for (let i=255;i>0;i--) { const j=Math.floor(Math.random()*(i+1)); [_perm[i],_perm[j]]=[_perm[j],_perm[i]]; }
+for (let i=0;i<256;i++) _perm[i+256]=_perm[i];
+function _fade(t){return t*t*t*(t*(t*6-15)+10);}
+function _lerp(a,b,t){return a+(b-a)*t;}
+function noise(x,y){
+  const X=Math.floor(x)&255,Y=Math.floor(y)&255;
+  const xf=x-Math.floor(x),yf=y-Math.floor(y);
+  const u=_fade(xf),v=_fade(yf);
+  const aa=_perm[_perm[X]+Y],ab=_perm[_perm[X]+Y+1];
+  const ba=_perm[_perm[X+1]+Y],bb=_perm[_perm[X+1]+Y+1];
+  return _lerp(
+    _lerp(_g2[aa&7][0]*xf+_g2[aa&7][1]*yf, _g2[ba&7][0]*(xf-1)+_g2[ba&7][1]*yf, u),
+    _lerp(_g2[ab&7][0]*xf+_g2[ab&7][1]*(yf-1), _g2[bb&7][0]*(xf-1)+_g2[bb&7][1]*(yf-1), u),
+    v
+  );
+}
+function fbm(x,y,oct){
+  let v=0,a=0.5,f=1;
+  for(let i=0;i<oct;i++){v+=noise(x*f,y*f)*a;a*=0.5;f*=2.1;}
+  return v;
+}
+
+// ---- Mood system ----
+const MOODS = {
+  fear: {
+    color: [255,30,40],
+    accentColor: [255,120,40],
+    noiseFreq: 4.5, noiseAmp: 0.35,
+    symmetry: 6, symmetryJitter: 0.6,
+    waveFreq: 18, waveAmp: 0.07,
+    fractalDepth: 7, fractalScale: 0.52,
+    jitter: 3.5, glitchRate: 0.18,
+    fadeEdge: 0.7, veilDensity: 0.55,
+    pulseSpeed: 2.8, label: 'FEAR',
+    symLabel: 'SHATTERING'
+  },
+  calm: {
+    color: [80,200,160],
+    accentColor: [120,220,200],
+    noiseFreq: 1.2, noiseAmp: 0.12,
+    symmetry: 12, symmetryJitter: 0.05,
+    waveFreq: 4, waveAmp: 0.03,
+    fractalDepth: 5, fractalScale: 0.48,
+    jitter: 0.3, glitchRate: 0.01,
+    fadeEdge: 0.85, veilDensity: 0.2,
+    pulseSpeed: 0.6, label: 'CALM',
+    symLabel: 'STABLE'
+  },
+  chaos: {
+    color: [200,80,255],
+    accentColor: [255,40,180],
+    noiseFreq: 6.0, noiseAmp: 0.5,
+    symmetry: 3, symmetryJitter: 1.2,
+    waveFreq: 28, waveAmp: 0.12,
+    fractalDepth: 9, fractalScale: 0.58,
+    jitter: 7.0, glitchRate: 0.45,
+    fadeEdge: 0.5, veilDensity: 0.75,
+    pulseSpeed: 4.5, label: 'CHAOS',
+    symLabel: 'COLLAPSING'
+  },
+  void: {
+    color: [60,60,80],
+    accentColor: [100,100,120],
+    noiseFreq: 0.8, noiseAmp: 0.06,
+    symmetry: 8, symmetryJitter: 0.02,
+    waveFreq: 2, waveAmp: 0.015,
+    fractalDepth: 3, fractalScale: 0.42,
+    jitter: 0.1, glitchRate: 0.005,
+    fadeEdge: 0.35, veilDensity: 0.88,
+    pulseSpeed: 0.25, label: 'VOID',
+    symLabel: 'DISSOLVING'
+  }
+};
+
+let currentMood = 'fear';
+let targetMood = 'fear';
+let moodBlend = 1.0;
+
+function getMoodParam(key) {
+  const a = MOODS[currentMood][key];
+  const b = MOODS[targetMood][key];
+  if (typeof a === 'number') return a + (b-a)*moodBlend;
+  return moodBlend > 0.5 ? b : a;
+}
+function getMoodColor() {
+  const a = MOODS[currentMood].color;
+  const b = MOODS[targetMood].color;
+  return [
+    a[0]+(b[0]-a[0])*moodBlend,
+    a[1]+(b[1]-a[1])*moodBlend,
+    a[2]+(b[2]-a[2])*moodBlend
+  ];
+}
+function getMoodAccent() {
+  const a = MOODS[currentMood].accentColor;
+  const b = MOODS[targetMood].accentColor;
+  return [
+    a[0]+(b[0]-a[0])*moodBlend,
+    a[1]+(b[1]-a[1])*moodBlend,
+    a[2]+(b[2]-a[2])*moodBlend
+  ];
+}
+
+// ---- Glitch state ----
+let glitchBands = [];
+let glitchDecay = 0;
+
+function spawnGlitch() {
+  const n = 1 + Math.floor(Math.random()*5);
+  glitchBands = [];
+  for (let i=0;i<n;i++) {
+    glitchBands.push({
+      y: Math.random()*H,
+      h: 1+Math.random()*10,
+      shift: (Math.random()-0.5)*60,
+      alpha: 0.6+Math.random()*0.4,
+      life: 1.0
+    });
+  }
+  glitchDecay = 0.08+Math.random()*0.15;
+}
+
+// ---- Sacred geometry helpers ----
+function polygon(ctx, cx, cy, r, sides, rot=0) {
+  ctx.beginPath();
+  for (let i=0;i<sides;i++) {
+    const a = rot + (i/sides)*Math.PI*2;
+    i===0 ? ctx.moveTo(cx+Math.cos(a)*r, cy+Math.sin(a)*r)
+           : ctx.lineTo(cx+Math.cos(a)*r, cy+Math.sin(a)*r);
+  }
+  ctx.closePath();
+}
+
+function flowerOfLife(ctx, cx, cy, r, color, alpha, t) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = `rgba(${color[0]},${color[1]},${color[2]},1)`;
+  ctx.lineWidth = 0.5;
+  // center + 6 surrounding circles
+  for (let i=0;i<7;i++) {
+    const a = (i/6)*Math.PI*2 + t*0.05;
+    const ox = i===0 ? 0 : Math.cos(a)*r;
+    const oy = i===0 ? 0 : Math.sin(a)*r;
+    ctx.beginPath();
+    ctx.arc(cx+ox, cy+oy, r, 0, Math.PI*2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function metatronsCube(ctx, cx, cy, r, color, alpha, t) {
+  ctx.save();
+  ctx.globalAlpha = alpha * 0.6;
+  ctx.strokeStyle = `rgba(${color[0]},${color[1]},${color[2]},1)`;
+  ctx.lineWidth = 0.4;
+  const pts = [];
+  for (let i=0;i<6;i++) {
+    const a = (i/6)*Math.PI*2 + t*0.02;
+    pts.push([cx+Math.cos(a)*r, cy+Math.sin(a)*r]);
+  }
+  pts.push([cx, cy]);
+  // connect all to all
+  for (let i=0;i<pts.length;i++)
+    for (let j=i+1;j<pts.length;j++) {
+      ctx.beginPath();
+      ctx.moveTo(pts[i][0],pts[i][1]);
+      ctx.lineTo(pts[j][0],pts[j][1]);
+      ctx.stroke();
+    }
+  ctx.restore();
+}
+
+// ---- Fractal limb (recursive branching) ----
+function fractalLimb(ctx, x, y, angle, len, depth, maxDepth, color, t, jitter) {
+  if (depth > maxDepth || len < 1.5) return;
+  const j = jitter * (Math.random()-0.5) * 0.5;
+  const ex = x + Math.cos(angle+j)*len;
+  const ey = y + Math.sin(angle+j)*len;
+  const alpha = (1 - depth/maxDepth) * 0.7;
+  ctx.strokeStyle = `rgba(${color[0]},${color[1]},${color[2]},${alpha})`;
+  ctx.lineWidth = Math.max(0.3, (1-depth/maxDepth)*1.5);
+  ctx.beginPath();
+  ctx.moveTo(x,y); ctx.lineTo(ex,ey);
+  ctx.stroke();
+  const scale = getMoodParam('fractalScale');
+  const spread = (Math.PI/getMoodParam('symmetry')) + getMoodParam('symmetryJitter')*0.2*(Math.random()-0.5);
+  fractalLimb(ctx, ex, ey, angle-spread, len*scale, depth+1, maxDepth, color, t, jitter);
+  fractalLimb(ctx, ex, ey, angle+spread, len*scale, depth+1, maxDepth, color, t, jitter);
+  if (getMoodParam('fractalDepth') > 5 && depth < maxDepth-2)
+    fractalLimb(ctx, ex, ey, angle+Math.PI*0.5, len*scale*0.5, depth+2, maxDepth, color, t, jitter);
+}
+
+// ---- Symmetry fold draw ----
+function withSymmetry(ctx, cx, cy, fn) {
+  const sym = Math.round(getMoodParam('symmetry'));
+  for (let i=0;i<sym;i++) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate((i/sym)*Math.PI*2);
+    fn(ctx, i);
+    ctx.restore();
+  }
+}
+
+// ---- Main render ----
+let t = 0;
+let lastGlitch = 0;
+
+function renderBg() {
+  bgCtx.clearRect(0,0,W,H);
+  bgCtx.fillStyle = '#000';
+  bgCtx.fillRect(0,0,W,H);
+
+  // Deep void noise field
+  const noiseFreq = getMoodParam('noiseFreq');
+  const noiseAmp = getMoodParam('noiseAmp');
+  const color = getMoodColor();
+  const imgData = bgCtx.createImageData(W, H);
+  const d = imgData.data;
+  const step = 3; // skip pixels for performance
+  for (let py=0; py<H; py+=step) {
+    for (let px=0; px<W; px+=step) {
+      const dx = (px-CX)/SIZE, dy = (py-CY)/SIZE;
+      const r = Math.sqrt(dx*dx+dy*dy);
+      const nv = fbm(dx*noiseFreq + t*0.1, dy*noiseFreq + t*0.08, 4);
+      const radFade = Math.max(0, 1 - r*1.8);
+      let bright = (nv*0.5+0.5) * radFade * noiseAmp;
+      // scanline
+      if (py%4===0) bright *= 0.3;
+      const ri = (py*W+px)*4;
+      for (let bx=0;bx<step;bx++) for(let by=0;by<step;by++) {
+        const ii = ((py+by)*W+(px+bx))*4;
+        d[ii]   = color[0]*bright;
+        d[ii+1] = color[1]*bright;
+        d[ii+2] = color[2]*bright;
+        d[ii+3] = 255;
+      }
+    }
+  }
+  bgCtx.putImageData(imgData,0,0);
+}
+
+function renderEntity() {
+  entCtx.clearRect(0,0,W,H);
+  const color = getMoodColor();
+  const accent = getMoodAccent();
+  const sym = Math.round(getMoodParam('symmetry'));
+  const jitter = getMoodParam('jitter');
+  const wFreq = getMoodParam('waveFreq');
+  const wAmp = getMoodParam('waveAmp');
+  const fDepth = Math.round(getMoodParam('fractalDepth'));
+  const pulseSpeed = getMoodParam('pulseSpeed');
+  const fade = getMoodParam('fadeEdge');
+  const nFreq = getMoodParam('noiseFreq');
+
+  const pulse = 0.92 + 0.08*Math.sin(t*pulseSpeed);
+  const R = SIZE * 0.32 * pulse;
+
+  // --- Core sacred geometry ---
+  // Flower of life (phasing)
+  const flowerAlpha = (0.3 + 0.2*Math.sin(t*0.5)) * fade;
+  flowerOfLife(entCtx, CX, CY, R*0.28, accent, flowerAlpha*0.5, t);
+
+  // Metatron's cube (deeper, dimmer)
+  const metAlpha = (0.15 + 0.1*Math.sin(t*0.3+1)) * fade;
+  metatronsCube(entCtx, CX, CY, R*0.45, color, metAlpha, t);
+
+  // --- Symmetry arms with sine-wave distorted paths ---
+  withSymmetry(entCtx, CX, CY, (ctx, idx) => {
+    const symJitter = getMoodParam('symmetryJitter') * (Math.random()-0.5)*2;
+
+    // Spine path with wave distortion
+    ctx.beginPath();
+    const steps = 60;
+    for (let i=0;i<=steps;i++) {
+      const frac = i/steps;
+      const baseR = R * frac;
+      const wave = Math.sin(frac*wFreq + t*pulseSpeed + idx) * wAmp * R;
+      const noisePush = noise(frac*nFreq+t*0.2, idx*1.7+t*0.1) * R * 0.06;
+      const angle = symJitter*0.3;
+      const x = (baseR+wave+noisePush) * Math.cos(angle);
+      const y = (baseR+wave+noisePush) * Math.sin(angle);
+      i===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+    }
+    const spineAlpha = (0.4 + 0.3*Math.sin(t*0.8+idx)) * fade;
+    ctx.strokeStyle = `rgba(${color[0]},${color[1]},${color[2]},${spineAlpha})`;
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+
+    // Polygons at intervals along spine
+    [0.3, 0.55, 0.8].forEach((frac, pi) => {
+      const baseR2 = R * frac;
+      const polyR = R * 0.06 * (1-frac*0.4) * pulse;
+      const sides = [3,4,6][pi % 3];
+      const rot = t*(0.3+pi*0.2) * (idx%2===0?1:-1);
+      const polyAlpha = (0.25 + 0.15*Math.sin(t+pi)) * fade;
+      polygon(ctx, baseR2, 0, polyR, sides, rot);
+      ctx.strokeStyle = `rgba(${accent[0]},${accent[1]},${accent[2]},${polyAlpha})`;
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+    });
+  });
+
+  // --- Fractal limbs emerging from void ---
+  const numLimbs = sym;
+  for (let i=0;i<numLimbs;i++) {
+    const baseAngle = (i/numLimbs)*Math.PI*2 + t*0.04*(i%2===0?1:-1);
+    const startR = R * (0.1 + 0.05*Math.sin(t+i));
+    const sx = CX + Math.cos(baseAngle)*startR;
+    const sy = CY + Math.sin(baseAngle)*startR;
+    const len = R * 0.22 * (0.8+0.2*Math.sin(t*1.2+i));
+    fractalLimb(entCtx, sx, sy, baseAngle, len, 0, fDepth, color, t, jitter*0.4);
+  }
+
+  // --- Core orb: layered rings ---
+  for (let ring=0;ring<6;ring++) {
+    const rr = R * (0.04 + ring*0.04) * pulse;
+    const rAlpha = (0.5 - ring*0.07) * fade * (0.7+0.3*Math.sin(t*pulseSpeed+ring));
+    const nJit = noise(ring+t*0.3, t*0.2) * jitter;
+    entCtx.beginPath();
+    entCtx.arc(CX + nJit, CY + nJit*0.7, rr, 0, Math.PI*2);
+    entCtx.strokeStyle = `rgba(${color[0]},${color[1]},${color[2]},${rAlpha})`;
+    entCtx.lineWidth = ring<2 ? 1.5 : 0.6;
+    entCtx.stroke();
+  }
+
+  // --- Outer unstable boundary ---
+  entCtx.save();
+  entCtx.translate(CX, CY);
+  entCtx.beginPath();
+  const bSteps = 180;
+  for (let i=0;i<=bSteps;i++) {
+    const a = (i/bSteps)*Math.PI*2;
+    const nv = fbm(Math.cos(a)*nFreq*0.5+t*0.15, Math.sin(a)*nFreq*0.5+t*0.1, 3);
+    const dr = R * (0.9 + nv*0.18 + Math.sin(a*sym+t*pulseSpeed)*wAmp*2);
+    const jx = (Math.random()-0.5)*jitter*0.5;
+    const jy = (Math.random()-0.5)*jitter*0.5;
+    const x = Math.cos(a)*dr + jx;
+    const y = Math.sin(a)*dr + jy;
+    i===0 ? entCtx.moveTo(x,y) : entCtx.lineTo(x,y);
+  }
+  entCtx.closePath();
+  entCtx.strokeStyle = `rgba(${color[0]},${color[1]},${color[2]},${0.18*fade})`;
+  entCtx.lineWidth = 1;
+  entCtx.stroke();
+  entCtx.restore();
+
+  // --- Cross-hatch geometry (fear only) ---
+  if (getMoodParam('glitchRate') > 0.1) {
+    entCtx.save();
+    entCtx.translate(CX, CY);
+    entCtx.globalAlpha = Math.min(0.3, getMoodParam('glitchRate'));
+    for (let i=-6;i<=6;i++) {
+      const y = i*(R/6);
+      entCtx.strokeStyle = `rgba(${color[0]},${color[1]},${color[2]},0.3)`;
+      entCtx.lineWidth = 0.4;
+      entCtx.beginPath();
+      entCtx.moveTo(-R*0.9, y); entCtx.lineTo(R*0.9, y);
+      entCtx.stroke();
+      entCtx.beginPath();
+      entCtx.moveTo(y, -R*0.9); entCtx.lineTo(y, R*0.9);
+      entCtx.stroke();
+    }
+    entCtx.restore();
+  }
+}
+
+function renderVeil() {
+  veilCtx.clearRect(0,0,W,H);
+  const color = getMoodColor();
+  const veilDensity = getMoodParam('veilDensity');
+  const nFreq = getMoodParam('noiseFreq');
+  const jitter = getMoodParam('jitter');
+
+  // Noise-driven obscuring veil
+  const step = 4;
+  const imgData = veilCtx.createImageData(W, H);
+  const d = imgData.data;
+  for (let py=0;py<H;py+=step) {
+    for (let px=0;px<W;px+=step) {
+      const dx = (px-CX)/SIZE, dy = (py-CY)/SIZE;
+      const r = Math.sqrt(dx*dx+dy*dy);
+      const nv = fbm(dx*nFreq*0.7+t*0.05, dy*nFreq*0.7-t*0.04, 3);
+      // veil is thicker outside, thinner at core
+      const radVeil = Math.min(1, r*1.4 + nv*0.4) * veilDensity;
+      const veilAlpha = Math.max(0, radVeil * (0.7+0.3*Math.sin(t*0.5)));
+      for (let bx=0;bx<step;bx++) for(let by=0;by<step;by++) {
+        const ii = ((py+by)*W+(px+bx))*4;
+        d[ii]=0; d[ii+1]=0; d[ii+2]=0;
+        d[ii+3] = Math.floor(veilAlpha*255);
+      }
+    }
+  }
+  veilCtx.putImageData(imgData,0,0);
+
+  // --- Glitch bands over veil ---
+  for (const band of glitchBands) {
+    if (band.life <= 0) continue;
+    veilCtx.save();
+    // shift region
+    const imgSlice = veilCtx.getImageData(0, band.y, W, band.h);
+    veilCtx.fillStyle = `rgba(${color[0]},${color[1]},${color[2]},${band.alpha*band.life*0.3})`;
+    veilCtx.fillRect(band.shift, band.y, W, band.h);
+    veilCtx.restore();
+    band.life -= glitchDecay;
+  }
+
+  // --- Digital interference lines ---
+  const glitchRate = getMoodParam('glitchRate');
+  if (Math.random() < glitchRate*0.3) {
+    const ly = Math.random()*H;
+    const lh = 1+Math.random()*3;
+    veilCtx.fillStyle = `rgba(${color[0]},${color[1]},${color[2]},${0.3+Math.random()*0.4})`;
+    veilCtx.fillRect(0, ly, W*(0.3+Math.random()*0.7), lh);
+  }
+
+  // Static noise specs
+  if (Math.random() < glitchRate) {
+    for (let i=0;i<40;i++) {
+      const sx = Math.random()*W, sy = Math.random()*H;
+      const sw = 1+Math.random()*4, sh = 1+Math.random()*2;
+      veilCtx.fillStyle = `rgba(${color[0]},${color[1]},${color[2]},${Math.random()*0.8})`;
+      veilCtx.fillRect(sx, sy, sw, sh);
+    }
+  }
+}
+
+function updateStatus() {
+  const mood = MOODS[targetMood];
+  document.getElementById('stat-mood').textContent = `MOOD: ${mood.label}`;
+  document.getElementById('stat-t').textContent = `T: ${t.toFixed(3)}`;
+  document.getElementById('stat-sym').textContent = `SYM: ${mood.symLabel}`;
+  document.getElementById('stat-depth').textContent = `DEPTH: ${mood.fractalDepth}`;
+}
+
+// ---- Mood switching ----
+document.querySelectorAll('.moodBtn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    currentMood = targetMood;
+    targetMood = btn.dataset.mood;
+    moodBlend = 0;
+    document.querySelectorAll('.moodBtn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    if (MOODS[targetMood].glitchRate > 0.1) spawnGlitch();
+  });
+});
+
+// ---- Animation loop ----
+let lastTime = 0;
+function loop(ts) {
+  const dt = Math.min((ts-lastTime)/1000, 0.05);
+  lastTime = ts;
+  t += dt;
+
+  // Blend mood
+  if (moodBlend < 1) moodBlend = Math.min(1, moodBlend + dt*0.8);
+
+  // Spawn glitches
+  const glitchRate = getMoodParam('glitchRate');
+  if (Math.random() < glitchRate * dt * 4) spawnGlitch();
+
+  renderBg();
+  renderEntity();
+  renderVeil();
+  updateStatus();
+
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
